@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+
+import psycopg2
+import subprocess
+from sys import argv
+import os
+import git
+
+class Database:
+    def __init__(self):
+        self.schemas = []
+        self.connections = {}
+        self.config = {}
+        self.config['config_section_prefix'] = 'database'
+        self.config['database_branch_prefix'] = 'database'
+        self.connection = None
+
+    def init(self, argv):
+        if os.path.exists('.git'):
+            print("Already a git repository, 'git-db init' should be run in a clean directory")
+            return 1
+    
+    def run(self, key, argv):
+        switch = {
+            'init': self.init,
+            'database': self.database
+        }
+        functionCall = switch.get(key)
+        if functionCall is None:
+            print("'" + key + "' is not a git-db function. See 'git-db --help'")
+            return
+        return functionCall(argv)
+
+    # --------------------------------------------------------------
+    # -------------------------- git db database -------------------
+    # --------------------------------------------------------------
+
+    def database(self, argv):
+        if len(argv) < 1 or argv[0] == '--help':
+            print('TODO: 1 database command: some usage info')
+            exit(0)
+        switch = {
+            'add': self.database_add,
+            'check': self.database_check,
+            'checkout': self.database_checkout
+        }
+        functionCall = switch.get(argv[0])
+        if functionCall is None:
+            print("TODO some helpful message")
+            return
+        return functionCall(argv[1:])
+    
+    def database_checkout(self, argv):
+        # two arguments are needed: name and address of the database
+        if len(argv) < 1 or argv[0] == '--help':
+            print('TODO: 3 database command: some usage info')
+            exit(0)
+        name = argv[0]
+        try:
+            branchHash = subprocess.check_output('git rev-parse --verify --quiet ' + self.config['database_branch_prefix'] + '/' + name, shell=True)
+            if len(branchHash) > 0:
+                print('Database branch already exists')
+                return
+        except:
+            # do nothing, a 256 error code should be returned from git if no branch exists
+            True
+        url, port, username, password = self.getDatabaseConnectionInfo(name)
+        connection = self.connect(url, port, username, password)
+        cursor = connection.cursor()
+        self.createDbBranch(name)
+        self.createDbDirectories(cursor)
+        self.setDatabaseConnections(name)
+        for c in self.connections:
+            schemas =  self.getSchemas(c)
+            self.createSchemaDirectories(c, schemas)
+        # self.createSchemaDirectories(cursos)
+
+    def database_add(self, argv):
+        # two arguments are needed: name and address of the database
+        if len(argv) < 2 or argv[0] == '--help':
+            print('TODO: 1 database command: some usage info')
+            exit(0)
+        name = argv[0]
+        # based on how remotes are stored
+        sectionName = self.config['config_section_prefix'] + ' "' + name + '"'
+        # save to git config file
+        r = git.Repo()
+        rw = r.config_writer()
+        if len(rw.get_value(sectionName, 'url', '')) > 0:
+            print('database "' + argv[0] + '" already exists')
+            return 0
+        urlArray = str.split(argv[1], ':')
+        url = urlArray[0]
+        rw.set_value(sectionName, 'url', url)
+        if len(urlArray) > 1:
+            rw.set_value(sectionName, 'port', urlArray[1])
+        if len(argv) > 2:
+            rw.set_value(sectionName, 'user', argv[2])
+        if len(argv) > 3:
+            rw.set_value(sectionName, 'password', argv[3])
+
+        rw.release()
+        return 0
+
+    def database_check(self, argv):
+        # two arguments are needed: name and address of the database
+        if len(argv) < 1 or argv[0] == '--help':
+            print('TODO: 1 database command: some usage info')
+            exit(0)
+        name = argv[0]
+        url, port, username, password = self.getDatabaseConnectionInfo(name)
+        connection = self.connect(url, port, username, password)
+        cursor = connection.cursor()
+        cursor.execute("SELECT version();")
+        record = cursor.fetchone()
+        if record:
+            print("You are connected to - ", record,"\n")
+            return True
+        else:
+            print('')
+            return False
+
+    # --------------------------------------------------------------
+    # -------------------------- util functions --------------------
+    # --------------------------------------------------------------
+
+    def connect(self, url, port, user, password, database=None):
+        try:
+            return psycopg2.connect(host=url, 
+                port=port,
+                user=user,
+                password=password,
+                database=database)
+        except:
+            if database is not None:
+                print("I am unable to connect to the database '" + database + "'")
+            else:
+                print("I am unable to connect to the database")
+            exit(1)
+    
+    def getDatabaseConnectionInfo(self, name):
+        # based on how remotes are stored
+        sectionName = self.config['config_section_prefix'] + ' "' + name + '"'
+
+        r = git.Repo()
+        rw = r.config_reader()
+        # url is mandatory
+        url = rw.get_value(sectionName, 'url', '')
+        if len(rw.get_value(sectionName, 'url', '')) == 0:
+            print('Database "' + argv[0] + '" does not exists')
+            return None
+        
+        port = rw.get_value(sectionName, 'port', '')
+        # default PgSQL port, if not specified directly
+        if not port:
+            port = '5432'
+        
+        username = rw.get_value(sectionName, 'user', '')
+        if len(username) == 0:
+            username = input('username:')
+        
+        password = rw.get_value(sectionName, 'password', '')
+        if len(password) == 0:
+            password = input('password:')
+        
+        return url, port, username, password
+
+    def setDatabases(self, cursor):
+        cursor.execute("SELECT datname FROM pg_database WHERE datistemplate = false;")
+        records = cursor.fetchall()
+        self.databases = [r[0] for r in records]
+
+    def createDbDirectories(self, cursor):
+        self.setDatabases(cursor)
+        for s in self.databases:
+            if os.path.exists(s):
+                print("Schema '" + s + "' already exists")
+            else :
+                os.makedirs(s)
+        return
+
+    def createDbBranch(self, name):
+        os.system('git checkout --orphan ' + self.config['database_branch_prefix'] + '/' + name)
+        os.system('git rm -rf .')
+
+    def setDatabaseConnections(self, name):
+        host, port, user, password = self.getDatabaseConnectionInfo(name)
+        for d in self.databases:
+            self.connections[d] = self.connect(host, port, user, password, d)
+    
+    def getSchemas(self, dbName):
+        connection = self.connections[dbName]
+        cursor = connection.cursor()
+        cursor.execute('''SELECT schema_name 
+            FROM information_schema.schemata 
+            WHERE schema_name NOT IN ('information_schema', 'pg_toast', 'pg_temp_1', 'pg_toast_temp_1', 'pg_catalog') ''')
+        records = cursor.fetchall()
+        return [r[0] for r in records]
+
+    def createSchemaDirectories(self, connection, schemas):
+        for s in schemas:
+            if os.path.exists(connection + '/' + s):
+                print("Schema '" + s + "' in '" + connection + "' already exists")
+            else :
+                os.makedirs(connection + '/' + s)
+        return
+
+if len(argv) < 2 or argv[1] == '--help':
+    print('TODO: some usage info')
+    exit(0)
+
+db = Database()
+db.run(argv[1], argv[2:])
