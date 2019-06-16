@@ -9,6 +9,7 @@ class Database:
         self.schemas = []
         self.connections = {}
         self.connection_info = {}
+        # TODO read config from somewhere
         self.config = {}
         self.config['config_section_prefix'] = 'database'
         self.config['database_branch_prefix'] = 'database'
@@ -18,6 +19,7 @@ class Database:
         if os.path.exists('.git'):
             print("Already a git repository, 'git-db init' should be run in a clean directory")
             return 1
+        # TODO: initialize default config
     
     def run(self, key, argv):
         switch = {
@@ -37,7 +39,7 @@ class Database:
 
     def remote(self, argv):
         if len(argv) < 1 or argv[0] == '--help':
-            print('TODO: 1 database command: some usage info')
+            print('TODO output: 1 database command: some usage info')
             exit(0)
         switch = {
             'add': self.remote_add,
@@ -46,13 +48,13 @@ class Database:
         }
         functionCall = switch.get(argv[0])
         if functionCall is None:
-            print("TODO 55 some helpful message")
+            print("TODO output 55 some helpful message")
             return
         return functionCall(argv[1:])
 
     def remote_add(self, argv):
         if len(argv) < 1 or argv[0] == '--help':
-            print('TODO: 3 database command: some usage info')
+            print('TODO output: 3 database command: some usage info')
             exit(0)
         name = argv[0]
         r = git.Repo()
@@ -69,19 +71,20 @@ class Database:
             'delete': {},
             'update': {}
         }
+        fileName = self.getNextPatchName()
+        if os.path.exists(fileName):
+            print('TODO output: 986544 database command: some usage info')
+            exit(0)
         # first look at new files and add them to patchData
         self.addNewFilesToPatch('tables')
-        # TODO: start here!
-        # atered files need to have some extra logic so that simpler local file
-        # do not trigger PGSQL commands if not needed (see test_patch table)
-        # self.addDeletedFilesToPatch('tables')
+        # TODO: work on deleted tables
+        self.addDeletedFilesToPatch('tables')
         self.addAlteredFilesToPatch('tables')
-        # self.checkTableDiff()
         self.pushChangesToPatchFile()
 
     def remote_apply(self, argv):
         if len(argv) < 1 or argv[0] == '--help':
-            print('TODO: 3567 database command: some usage info')
+            print('TODO output: 3567 database command: some usage info')
             exit(0)
         patchName = argv[0]
 
@@ -110,31 +113,48 @@ class Database:
 
     def database(self, argv):
         if len(argv) < 1 or argv[0] == '--help':
-            print('TODO: 1 database command: some usage info')
+            print('TODO output: 1 database command: some usage info')
             exit(0)
         switch = {
             'add': self.database_add,
             'check': self.database_check,
-            'init': self.database_init,
             'pull': self.database_pull
         }
         functionCall = switch.get(argv[0])
         if functionCall is None:
-            print("TODO some helpful message")
+            print("TODO output some helpful message")
             return
         return functionCall(argv[1:])
     
     def database_pull(self, argv):
-        # two arguments are needed: name and address of the database
         if len(argv) < 1 or argv[0] == '--help':
-            print('TODO: 3 database command: some usage info')
+            print('usage: git db database pull <name>')
+            exit(0)
+        r = git.Repo()
+        if len(r.index.diff(None)) != 0 or len(r.untracked_files) != 0:
+            print('Your working tree has uncomitted changes.')
+            print('Please, commit your changes or stash them before you can switch branches')
             exit(0)
         name = argv[0]
         url, port, username, password = self.getDatabaseConnectionInfo(name)
         connection = self.connect(url, port, username, password)
         cursor = connection.cursor()
-        # TODO: check is the working tree clar (no untracked files etc)
-        os.system('git ls-tree --name-only HEAD | xargs rm -r')
+        message = '[GIT DB] pulled from remote'
+        # check does the target database branch exists
+        # if anything in the block returns an exception it means the branch does not exists
+        try:
+            branchName = self.config['database_branch_prefix'] + '/' + name
+            branchHash = subprocess.check_output('git rev-parse --verify --quiet ' \
+                 + branchName, shell=True)
+            if len(branchHash) > 0:
+                print('Pulling to existing branch for database: "' + name + '"')
+                os.system('git checkout ' + branchName)
+                os.system('git ls-tree --name-only HEAD | xargs rm -r')
+        except:
+            print('Creating database branch for database: "' + name + '"')
+            message = '[GIT DB] initial commit'
+            self.createDbBranch(name)
+
         self.createDbDirectories(cursor)
         self.setDatabaseConnections(name)
         for conn in self.connections:
@@ -148,52 +168,16 @@ class Database:
                 print("Fetching table structure for: '" + schema + "'")
                 self.createTabletructure(conn, schema)
         r = git.Repo()
-        if len(r.index.diff()) == 0 and len(r.untracked_files) == 0:
+        if len(r.index.diff(None)) == 0 and len(r.untracked_files) == 0:
             print('\n\nNothing to commit')
         else:
-            # print('\n\nNothing to commit')
-            # print('commit')
             r.git.add('.')
-            r.git.commit('-m', '[GIT DB] pulled from remote')
+            r.git.commit('-m', message)
     
-    def database_init(self, argv):
-        # two arguments are needed: name and address of the database
-        if len(argv) < 1 or argv[0] == '--help':
-            print('TODO: 3 database command: some usage info')
-            exit(0)
-        name = argv[0]
-        try:
-            branchHash = subprocess.check_output('git rev-parse --verify --quiet ' + self.config['database_branch_prefix'] + '/' + name, shell=True)
-            if len(branchHash) > 0:
-                print('Database branch already exists')
-                return
-        except:
-            # do nothing, a 256 error code should be returned from git if no branch exists
-            True
-        url, port, username, password = self.getDatabaseConnectionInfo(name)
-        connection = self.connect(url, port, username, password)
-        cursor = connection.cursor()
-        self.createDbBranch(name)
-        self.createDbDirectories(cursor)
-        self.setDatabaseConnections(name)
-        for conn in self.connections:
-            schemas =  self.getSchemas(conn)
-            self.createSchemaDirectories(conn, schemas)
-        
-        for conn in self.connections:
-            schemas =  self.getSchemas(conn)
-            print("\r\n======== Connected to: '" + conn + '" ========')
-            for schema in schemas:
-                print("Fetching table structure for: '" + schema + "'")
-                self.createTabletructure(conn, schema)
-        r = git.Repo()
-        r.git.add('.')
-        r.git.commit('-m', '[GIT DB] initial commit')
-
     def database_add(self, argv):
         # two arguments are needed: name and address of the database
         if len(argv) < 2 or argv[0] == '--help':
-            print('TODO: 1 database command: some usage info')
+            print('TODO output: 1 database command: some usage info')
             exit(0)
         name = argv[0]
         # based on how remotes are stored
@@ -220,7 +204,7 @@ class Database:
     def database_check(self, argv):
         # two arguments are needed: name and address of the database
         if len(argv) < 1 or argv[0] == '--help':
-            print('TODO: 1 database command: some usage info')
+            print('TODO output: 1 database command: some usage info')
             exit(0)
         name = argv[0]
         url, port, username, password = self.getDatabaseConnectionInfo(name)
@@ -302,7 +286,11 @@ class Database:
 
     def createDbBranch(self, name):
         os.system('git checkout --orphan ' + self.config['database_branch_prefix'] + '/' + name)
-        os.system('git rm -rf .')
+        try:
+            with open(os.devnull, 'wb') as devnull:
+                os.system('git rm -rf .', stdout=devnull, stderr=devnull)
+        except:
+            pass
 
     def setDatabaseConnections(self, name):
         host, port, user, password = self.getDatabaseConnectionInfo(name)
@@ -390,18 +378,35 @@ class Database:
         currentCommit = r.commit("local")
         remoteCommit = r.commit(self.patchTarget)
         diffIndex = remoteCommit.diff(currentCommit)
-        diffIndexPatch = remoteCommit.diff(currentCommit,create_patch=True)
 
         for newItem in diffIndex.iter_change_type('M'):
             if directory is 'tables':
-                addToPatch = self.checkTableDiff(newItem, diffIndexPatch, newItem.b_path)
+                addToPatch = self.checkTableDiff(newItem, newItem.b_path)
                 if addToPatch:
                     self.patchData['update'][newItem.b_path] = addToPatch
             else:
                 self.patchData['update'][newItem.b_path] = self.getFileContent(newItem.b_path)
         return
     
-    def checkTableDiff(self, itemBlob, diffIndex, filePath):
+    def addDeletedFilesToPatch(self, directory):
+        r = git.Repo()
+        currentCommit = r.commit("local")
+        remoteCommit = r.commit(self.patchTarget)
+        diffIndex = remoteCommit.diff(currentCommit)
+
+        for removedItem in diffIndex.iter_change_type('D'):
+            pathArray = removedItem.a_path.split('/')
+            if len(pathArray) > 2 \
+                and pathArray[2] == directory \
+                and directory == 'tables':
+
+                tableName = pathArray[-3] + '\.' \
+                    + pathArray[-1].split('.')[0]
+                self.patchData['delete'][removedItem.a_path] = \
+                    'DROP TABLE IF EXISTS ' + tableName.replace('\.', '.') + ';\n\n'
+        return
+    
+    def checkTableDiff(self, itemBlob, filePath):
         targetFile = itemBlob.a_blob.data_stream.read().decode('utf-8')
         currentFile = itemBlob.b_blob.data_stream.read().decode('utf-8')
         tableName = filePath.split('/')[-3] + '\.' + filePath.split('/')[-1].split('.')[0]
@@ -409,14 +414,13 @@ class Database:
         currentFileParts = currentFile.split(';')
         targetFileParts = targetFile.split(';')
         # get a diff string
-        diff = ''
-        for updatedItem in diffIndex.iter_change_type('M'):
-            if updatedItem.b_path == itemBlob.b_path:
-                diff = updatedItem.diff
-                break
+        # diff = ''
+        # for updatedItem in diffIndex.iter_change_type('M'):
+        #     if updatedItem.b_path == itemBlob.b_path:
+        #         diff = updatedItem.diff
+        #         break
         
         patch = self.compareTableStructure(currentFileParts, targetFileParts, tableName)
-        print(patch)
         return patch
         
     def compareTableStructure(self, currentFileParts, targetFileParts, tableName):
@@ -448,17 +452,16 @@ class Database:
         createTableColumnsTarget = createTableTarget.split(',')
         checkTableColumnsTarget = [''.join(c.split()) for c in createTableColumnsTarget]
         checkTableColumnsCurrent = [''.join(c.split()) for c in createTableColumnsCurrent]
-
         isAltered = False
         for c in createTableColumnsCurrent:
             colCheck = ''.join(c.split())
-            if colCheck not in checkTableColumnsTarget:
+            if c is not '' and colCheck not in checkTableColumnsTarget:
                 sql += 'ADD COLUMN IF NOT EXISTS ' + c.lstrip() + ',\n'
                 isAltered = True
         
         for c in createTableColumnsTarget:
             colCheck = ''.join(c.split())
-            if colCheck not in checkTableColumnsCurrent:
+            if c is not '' and colCheck not in checkTableColumnsCurrent:
                 sql += 'DROP COLUMN IF EXISTS ' + c.lstrip().split()[0] + ',\n'
                 isAltered = True
 
