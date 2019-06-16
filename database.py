@@ -54,33 +54,53 @@ class Database:
 
     def remote_add(self, argv):
         if len(argv) < 1 or argv[0] == '--help':
-            print('TODO output: 3 database command: some usage info')
+            print('usage: git db remote add <name>')
             exit(0)
         name = argv[0]
         r = git.Repo()
-        branch = r.active_branch
-        branch = branch.name
+        branch = r.active_branch.name
         sectionName = "branch \"%s\"" % branch
         rw = r.config_writer()
+        if not rw.has_section('%s "%s"' % (self.config['config_section_prefix'], name)):
+            print("Database '" + name + "' does not exist")
+            exit(1)
         rw.set_value(sectionName, 'database', self.config['config_section_prefix'] + '/' + name)
+        # TODO: add more patch numbering options
+        rw.set_value(sectionName, 'numbering', 'simple')
+        rw.set_value(sectionName, 'current', 0)
+        rw.release()
+        print("Branch '" + branch + "' set to track database '" + name + "'")
     
     def remote_patch(self, argv):
-        self.patchTarget = 'database/local'
+        useNextNumber = False if '--overwrite' in argv else True
+
+        # read patch target (database the patch is for) from branch config
+        self.setPatchTarget()
+        # initialize patch data
         self.patchData = {
             'new': {},
             'delete': {},
             'update': {}
         }
-        fileName = self.getNextPatchName()
-        if os.path.exists(fileName):
-            print('TODO output: 986544 database command: some usage info')
-            exit(0)
         # first look at new files and add them to patchData
         self.addNewFilesToPatch('tables')
-        # TODO: work on deleted tables
         self.addDeletedFilesToPatch('tables')
         self.addAlteredFilesToPatch('tables')
-        self.pushChangesToPatchFile()
+        
+        mode = 'w'
+        if self.checkPatchData():
+            self.pushChangesToPatchFile(useNextNumber, mode)
+            mode = 'a'
+            useNextNumber = False
+
+        # TODO: add more than tables like so:
+        # self.addNewFilesToPatch('views')
+        # self.addDeletedFilesToPatch('views')
+        # self.addAlteredFilesToPatch('views')
+        # self.pushChangesToPatchFile(useNextNumber, useNextNumber, mode)
+
+        if (mode == 'w'):
+            print("Nothing to patch")
 
     def remote_apply(self, argv):
         if len(argv) < 1 or argv[0] == '--help':
@@ -339,16 +359,6 @@ class Database:
                 conn
             ))
     
-    # TODO: dummy for the moment, this will need to be config-driven
-    # to apply naming convention and adding patch numbers in a meaningful way
-    def getNextPatchName(self):
-        if not os.path.exists('./patches'):
-            os.makedirs('./patches')
-        return 'patches/patch_1.sql'
-    
-    def getCurrentPatchName(self):
-        return 'patches/patch_1.sql'
-    
     def addNewFilesToPatch(self, directory):
         r = git.Repo()
         currentCommit = r.commit("local")
@@ -365,9 +375,9 @@ class Database:
             s = f.read()
         return s
     
-    def pushChangesToPatchFile(self):
-        fileName = self.getNextPatchName()
-        with open(fileName, 'a') as f:
+    def pushChangesToPatchFile(self, next, mode='w'):
+        fileName = self.getPatchName(next)
+        with open(fileName, mode) as f:
             for changeType in ['delete', 'new', 'update']:
                 for key, data in self.patchData[changeType].items():
                     f.write('-- ' + key + '\n')
@@ -480,3 +490,60 @@ class Database:
                 sql += c + ';\n'
 
         return sql
+    
+    def setPatchTarget(self):
+        r = git.Repo()
+        rw = r.config_writer()
+        branch = r.active_branch.name
+        sectionName = "branch \"%s\"" % branch
+        self.patchTarget = None
+
+        if rw.has_section(sectionName) and rw.has_option(sectionName, 'database'):
+            self.patchTarget = rw.get(sectionName, 'database')
+            rw.release()
+        else:
+            print("Branch '%s' is not tracking any database" % branch)
+            rw.release()
+            exit(1)
+
+    def getSimplePatchNumber(self, current, next=True):
+        if next:
+            return int(current) + 1
+        return int(current)
+
+    def getPatchName(self,next=True):
+        r = git.Repo()
+        rw = r.config_writer()
+        branch = r.active_branch.name
+        sectionName = "branch \"%s\"" % branch
+        numberingMethod = None
+        currentNumber = None
+        if rw.has_section(sectionName) \
+            and rw.has_option(sectionName, 'numbering') \
+            and rw.has_option(sectionName, 'current'):
+            
+            numberingMethod = rw.get(sectionName, 'numbering')
+            currentNumber = rw.get(sectionName, 'current')
+        
+        if numberingMethod is None or currentNumber is None:
+            print("Patch numbering method was not selected")
+        
+        number = None
+        if numberingMethod == 'simple':
+            number = self.getSimplePatchNumber(currentNumber, next)
+        
+        if number is None:
+            print('Patch number could not be calculated')
+            exit(1)
+        
+        rw.set_value(sectionName, 'current', number)
+        filePath = 'patches/patch_%s.sql' % number
+        rw.release()
+        return filePath
+    
+    def checkPatchData(self):
+        for key in ['new', 'delete', 'update']:
+            if len(self.patchData[key]) > 0:
+                return True
+        
+        return False
