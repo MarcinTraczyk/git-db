@@ -395,7 +395,7 @@ class Database:
             for changeType in ['delete', 'new', 'update']:
                 for key, data in self.patchData[changeType].items():
                     f.write('-- ' + key + '\n')
-                    f.write(data)
+                    f.write(re.sub('\n\n+', '\n\n', data))
     
     def addAlteredFilesToPatch(self, directory):
         r = git.Repo()
@@ -495,13 +495,13 @@ class Database:
         for c in createTableColumnsCurrent:
             colCheck = ''.join(c.split())
             if c is not '' and colCheck not in checkTableColumnsTarget:
-                sql += 'ADD COLUMN IF NOT EXISTS ' + c.lstrip() + ',\n'
+                sql += '\tADD COLUMN IF NOT EXISTS ' + c.lstrip() + ',\n'
                 isAltered = True
         
         for c in createTableColumnsTarget:
             colCheck = ''.join(c.split())
             if c is not '' and colCheck not in checkTableColumnsCurrent:
-                sql += 'DROP COLUMN IF EXISTS ' + c.lstrip().split()[0] + ',\n'
+                sql += '\tDROP COLUMN IF EXISTS ' + c.lstrip().split()[0] + ',\n'
                 isAltered = True
 
         if isAltered:
