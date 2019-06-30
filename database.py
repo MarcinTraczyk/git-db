@@ -9,17 +9,29 @@ class Database:
         self.schemas = []
         self.connections = {}
         self.connection_info = {}
-        # TODO read config from somewhere
-        self.config = {}
-        self.config['config_section_prefix'] = 'database'
-        self.config['database_branch_prefix'] = 'database'
+        
+        if os.path.exists('.git'):
+            r = git.Repo()
+            rw = r.config_reader()
+            sectionName = 'git-db'
+            self.config = {}
+            self.config['config_section_prefix'] = rw.get_value(sectionName, 'configsectionprefix', '')
+            self.config['database_branch_prefix'] = rw.get_value(sectionName, 'databasebranchprefix', '')
+            self.config['database'] = rw.get_value(sectionName, 'database', '')
+            self.config['default_database'] = rw.get_value(sectionName, 'defaultdatabase', '')
+            rw.release()
         self.connection = None
 
     def init(self, argv):
-        if os.path.exists('.git'):
-            print("Already a git repository, 'git-db init' should be run in a clean directory")
-            return 1
-        # TODO: initialize default config
+        if not os.path.exists('.git'):
+            os.system('git init')
+        r = git.Repo()
+        rw = r.config_writer()
+        sectionName = 'git-db'
+        rw.set_value(sectionName, 'configsectionprefix', 'database')
+        rw.set_value(sectionName, 'databasebranchprefix', 'database')
+        rw.set_value(sectionName, 'database', 'pgsql')
+        rw.release()
     
     def run(self, key, argv):
         switch = {
@@ -43,8 +55,7 @@ class Database:
             exit(0)
         switch = {
             'add': self.remote_add,
-            'patch': self.remote_patch,
-            'apply': self.remote_apply,
+            'patch': self.remote_patch
         }
         functionCall = switch.get(argv[0])
         if functionCall is None:
@@ -102,31 +113,6 @@ class Database:
         if (mode == 'w'):
             print("Nothing to patch")
 
-    def remote_apply(self, argv):
-        if len(argv) < 1 or argv[0] == '--help':
-            print('TODO output: 3567 database command: some usage info')
-            exit(0)
-        patchName = argv[0]
-
-        name = argv[0]
-        url, port, username, password = self.getDatabaseConnectionInfo('local')
-        connection = self.connect(url, port, username, password)
-        cursor = connection.cursor()
-
-        command = 'BEGIN;\n'
-        command += self.getFileContent(patchName) + '\n'
-        command += 'COMMIT;\n'
-
-        try:
-            cursor.execute(command)
-            print ('Patch applied')
-        except psycopg2.Error as e:
-            print ('Error applying patch\n')
-            print ('PGSQL error code: ' + e.pgcode + '\n')
-            print ('PGSQL error message: \n\n' + e.pgerror + '\n')
-            cursor.execute('ROLLBACK;')
-            pass
-    
     # --------------------------------------------------------------
     # -------------------------- git db database -------------------
     # --------------------------------------------------------------
@@ -138,7 +124,8 @@ class Database:
         switch = {
             'add': self.database_add,
             'check': self.database_check,
-            'pull': self.database_pull
+            'pull': self.database_pull,
+            'apply': self.database_apply,
         }
         functionCall = switch.get(argv[0])
         if functionCall is None:
@@ -218,6 +205,9 @@ class Database:
         if len(argv) > 3:
             rw.set_value(sectionName, 'password', argv[3])
         # save buffer and release file handle
+
+        if '--default' in argv:
+            rw.set_value('git-db', 'defaultdatabase', name)
         rw.release()
         return 0
 
@@ -239,6 +229,31 @@ class Database:
             print('')
             return False
 
+    def database_apply(self, argv):
+        if len(argv) < 1 or argv[0] == '--help':
+            print('TODO output: 3567 database command: some usage info')
+            exit(0)
+        patchName = argv[0]
+
+        name = argv[0]
+        url, port, username, password = self.getDatabaseConnectionInfo('local')
+        connection = self.connect(url, port, username, password)
+        cursor = connection.cursor()
+
+        command = 'BEGIN;\n'
+        command += self.getFileContent(patchName) + '\n'
+        command += 'COMMIT;\n'
+
+        try:
+            cursor.execute(command)
+            print ('Patch applied')
+        except psycopg2.Error as e:
+            print ('Error applying patch\n')
+            print ('PGSQL error code: ' + e.pgcode + '\n')
+            print ('PGSQL error message: \n\n' + e.pgerror + '\n')
+            cursor.execute('ROLLBACK;')
+            pass
+    
     # --------------------------------------------------------------
     # -------------------------- util functions --------------------
     # --------------------------------------------------------------
@@ -497,6 +512,12 @@ class Database:
         branch = r.active_branch.name
         sectionName = "branch \"%s\"" % branch
         self.patchTarget = None
+
+        if not rw.has_section(sectionName) or not rw.has_option(sectionName, 'database'):
+            if len(self.config['default_database']) > 0:
+                rw.release()
+                self.remote_add([self.config['default_database']])
+                rw = r.config_writer()
 
         if rw.has_section(sectionName) and rw.has_option(sectionName, 'database'):
             self.patchTarget = rw.get(sectionName, 'database')
