@@ -84,7 +84,6 @@ class Database:
     
     def remote_patch(self, argv):
         useNextNumber = False if '--overwrite' in argv else True
-
         # read patch target (database the patch is for) from branch config
         self.setPatchTarget()
         # initialize patch data
@@ -353,12 +352,12 @@ class Database:
             if os.path.exists(connection + '/' + s):
                 print("Schema '" + s + "' in '" + connection + "' already exists")
             else :
-                os.makedirs(connection + '/' + s)
+                os.makedirs(connection + '/structure/' + s)
         return
 
     def createTabletructure(self, conn, schema):
         tables = self.getTables(conn, schema)
-        path = "%s/%s/tables" % (conn, schema)
+        path = "%s/structure/%s/tables" % (conn, schema)
         if not os.path.exists(path):
             os.makedirs(path)
         for t in tables:
@@ -435,9 +434,21 @@ class Database:
         targetFile = itemBlob.a_blob.data_stream.read().decode('utf-8')
         currentFile = itemBlob.b_blob.data_stream.read().decode('utf-8')
         tableName = filePath.split('/')[-3] + '\.' + filePath.split('/')[-1].split('.')[0]
+
+        # filter out comments
+        currentFileParts = currentFile.split('\n')
+        currentFileParts = [row for row in currentFileParts if not re.match('^\h*--', row)]
+        currentFileParts = '\n'.join(currentFileParts)
+
+        targetFileParts = targetFile.split('\n')
+        targetFileParts = [row for row in targetFileParts if not re.match('^\h*--', row)]
+        targetFileParts = '\n'.join(targetFileParts)
+
         # split both files per-command
-        currentFileParts = currentFile.split(';')
-        targetFileParts = targetFile.split(';')
+        currentFileParts = currentFileParts.split(';')
+        targetFileParts = targetFileParts.split(';')
+
+        # targetFileParts = [row for row in targetFileParts if not re.match('^\h*--', row)]
         # get a diff string
         # diff = ''
         # for updatedItem in diffIndex.iter_change_type('M'):
@@ -454,23 +465,26 @@ class Database:
         createTableCurrent = None
         createTableTarget  = None
         # store everything that is not 'create table' in these array
-        remainingFilePartsCurrent = []
-        remainingFilePartsTarget = []
+        remainingFilePartsCurrent = {}
+        remainingFilePartsTarget = {}
 
         for el in currentFileParts:
-            el = "".join(el.lower().split('\n'))
-            reObj = re.search('create\s+table\s*' + tableName + '\s*\((.*)\)', el)
+            el_clear = "".join(el.lower().split('\n'))
+            reObj = re.search('create\s+table\s*' + tableName + '\s*\((.*)\)', el_clear)
             if reObj:
                 createTableCurrent = reObj.group(1)
             else:
-                remainingFilePartsCurrent.append(el)
+                el_clear = "".join(el_clear.split())
+                remainingFilePartsCurrent[el_clear] = el
+
         for el in targetFileParts:
-            el = "".join(el.lower().split('\n'))
-            reObj = re.search('create\s+table\s*' + tableName + '\s*\((.*)\)', el)
+            el_clear = "".join(el.lower().split('\n'))
+            reObj = re.search('create\s+table\s*' + tableName + '\s*\((.*)\)', el_clear)
             if reObj:
                 createTableTarget = reObj.group(1)
             else:
-                remainingFilePartsTarget.append(el)
+                el_clear = "".join(el_clear.split())
+                remainingFilePartsTarget[el_clear] = el
 
         # split the create table into column definitions. Strip whitespace for eaier comparison        
         createTableColumnsCurrent = createTableCurrent.split(',')
@@ -498,11 +512,11 @@ class Database:
         # whatever remains in the local file and is not identical to the target file
         # should be considered an alteration and added to patch
         isAltered = False
-        remainingFilePartsTargetCheck = [''.join(c.split()) for c in remainingFilePartsTarget]
-        for c in remainingFilePartsCurrent:
-            if c is not '' and c not in remainingFilePartsTargetCheck:
+        remainingFilePartsTargetCheck = remainingFilePartsTarget.keys()
+        for key, value in remainingFilePartsCurrent.items():
+            if key is not '' and key not in remainingFilePartsTargetCheck:
                 isAltered = True
-                sql += c + ';\n'
+                sql += value + ';\n'
 
         return sql
     
@@ -556,7 +570,9 @@ class Database:
         if number is None:
             print('Patch number could not be calculated')
             exit(1)
-        
+        if not os.path.exists('patches'):
+            os.mkdir('patches')
+
         rw.set_value(sectionName, 'current', number)
         filePath = 'patches/patch_%s.sql' % number
         rw.release()
