@@ -24,6 +24,8 @@ class Database:
             self.config['database'] = rw.get_value(sectionName, 'database', '')
             self.config['default_database'] = rw.get_value(sectionName, 'defaultdatabase', '')
             self.config['store_migrations'] = rw.get_value(sectionName, 'storemigrations', '')
+            self.config['ignore_db'] = rw.get_value(sectionName, 'ignoredb', '')
+            self.config['ignore_schema'] = rw.get_value(sectionName, 'ignoredb', 'git_db')
             rw.release()
         self.connection = None
 
@@ -95,6 +97,7 @@ class Database:
             exit(0)
         switch = {
             'create': self.patch_create,
+            'apply': self.patch_apply
             # 'migration': self.patch_make_migration
         }
         functionCall = switch.get(argv[0])
@@ -157,7 +160,6 @@ class Database:
             'add': self.database_add,
             'check': self.database_check,
             'pull': self.database_pull,
-            'apply': self.database_apply,
         }
         functionCall = switch.get(argv[0])
         if functionCall is None:
@@ -194,6 +196,7 @@ class Database:
             message = '[GIT DB] initial commit'
             self.createDbBranch(name)
 
+        self.setDatabases(cursor)
         self.createDbDirectories(cursor)
         self.setDatabaseConnections(name)
         for conn in self.connections:
@@ -266,30 +269,6 @@ class Database:
             print('')
             return False
 
-    def database_apply(self, argv):
-        if len(argv) < 1 or argv[0] == '--help':
-            print('TODO output: 3567 database command: some usage info')
-            exit(0)
-
-        patchName = argv[0]
-        url, port, username, password = self.getDatabaseConnectionInfo('local')
-        connection = self.connect(url, port, username, password)
-        cursor = connection.cursor()
-
-        command = 'BEGIN;\n'
-        command += self.getFileContent(patchName) + '\n'
-        command += 'COMMIT;\n'
-
-        try:
-            cursor.execute(command)
-            print ('Patch applied')
-        except psycopg2.Error as e:
-            print ('Error applying patch\n')
-            print ('PGSQL error code: ' + e.pgcode + '\n')
-            print ('PGSQL error message: \n\n' + e.pgerror + '\n')
-            cursor.execute('ROLLBACK;')
-            pass
-
     # --------------------------------------------------------------
     # -------------------------- git db patch ----------------------
     # --------------------------------------------------------------
@@ -318,6 +297,7 @@ class Database:
         self.addNewFilesToPatch('tables')
         self.addDeletedFilesToPatch('tables')
         self.addAlteredFilesToPatch('tables')
+
         dbNeedsPatch = False
         if self.checkPatchData():
             self.pushChangesToPatchFile(useNextNumber)
@@ -345,37 +325,79 @@ class Database:
         else:
             print("Nothing to patch")
 
+    def patch_apply(self, argv):
+        if len(argv) > 0 and argv[0] == '--help':
+            print('usage: git db patch apply <database name> <patch name>')
+            # exit(0)
+        elif len(argv) == 1:
+            connectionName = argv[0]
+            patchName = self.getPatchName(False).split('/')[-1]
+            self.patchTarget = 'database/' + connectionName
+        elif len(argv) == 2:
+            connectionName = argv[0]
+            patchName = argv[1]
+            self.patchTarget = 'database/' + connectionName
+        else:
+            self.setPatchTarget()
+            connectionName = self.getDatabaseFromPatchTarget()
+            patchName = self.getPatchName(False).split('/')[-1]
+        print('Do you want to apply patch \'%s\' to the database \'%s\'? [y/n]' 
+            % (patchName, connectionName))
+        choice = input().lower()
+        if (choice != 'y'):
+            print ('[Abort]')
+            exit(0)
 
-    # def patch_make_migration(self, argv):
-    #     patches = None
-    #     self.patchTarget = None
-    #     if '--all' in argv:
-    #         # TODO get all patches
-    #         patches = next(os.walk('patches'))[1]
-    #         argv.remove('--all')
-    #     elif '--current' in argv:
-    #         # TODO get all patches
-    #         patches = ['current']
-    #         argv.remove('--current')
-    #     elif len(argv) == 2:
-    #         patches = [argv[1]]
-    #     elif len(argv) == 1:
-    #         patches = [argv[0]]
-        
-    #     if len(argv) == 2:
-    #         self.patchTarget = [argv[0]]
-    #     elif len(argv) == 0:
-    #         self.setPatchTarget()
+        url, port, username, password = self.getDatabaseConnectionInfo('local')
+        conn = self.connect(url, port, username, password)
+        cursor = conn.cursor()
+        self.setDatabases(cursor)
+        self.setDatabaseConnections(connectionName)
 
-    #     if self.patchTarget is None or patches is None:
-    #         print('TODO output: 154567 database command: some usage info')
-    #         exit(0)
+        for f in os.listdir('patches/'+ patchName):
+            ext = f.split('.')[-1]
+            name = f.split('.')[0]
+            if ext == 'sql' and name not in self.connections.keys():
+                conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+                cursor = conn.cursor()
+                cursor.execute("CREATE DATABASE %s;" % name)
+                self.setDatabases(cursor)
+                self.setDatabaseConnections(connectionName)
+                self.registerPatch(patchName, name)
+                self.registerExistingFiles(patchName, name)
+                
+        for dbName, connection in self.connections.items():
+            patchFilePath = 'patches/' + patchName + '/' + dbName + '.sql'
+            if (os.path.exists(patchFilePath)):
+                cursor = connection.cursor()
+                print('\n\nApplying patch file \'%s\'' % patchFilePath)
+                    
+                command = 'BEGIN;\n'
+                command += self.getFileContent(patchFilePath) + '\n'
+                command += 'COMMIT;\n'
 
-    #     print(patches, self.patchTarget)
-    # def patch_apply(self, argv):
-    #     # if migrations are stored in the database create the git_db schema
-    #     if self.config['store_migrations'] == 'database':
-    #         self.createGitDbSchema(name)
+                try:
+                    cursor.execute(command)
+                    cursor.execute('''UPDATE git_db.patch 
+                        SET applied = TRUE, applied_timestamp = current_timestamp
+                        WHERE name = %s;
+
+                        UPDATE git_db.query 
+                        SET applied = TRUE, applied_timestamp = current_timestamp
+                        WHERE applied_patch_id = (
+                            SELECT id FROM git_db.patch WHERE name = %s
+                        );''', (patchName, patchName))
+                    connection.commit()
+                    print ('...ok')
+                except psycopg2.Error as e:
+                    print ('Error applying patch')
+                    print ('PGSQL error code: ' + e.pgcode)
+                    print ('PGSQL error message:' 
+                        + '\n----------------\n' 
+                        + e.pgerror 
+                        + '----------------')
+                    connection.rollback()
+                    pass
     # --------------------------------------------------------------
     # -------------------------- util functions --------------------
     # --------------------------------------------------------------
@@ -433,7 +455,6 @@ class Database:
         self.databases = [r[0] for r in records]
 
     def createDbDirectories(self, cursor):
-        self.setDatabases(cursor)
         for s in self.databases:
             if os.path.exists(s):
                 print("Schema '" + s + "' already exists")
@@ -511,10 +532,12 @@ class Database:
                         'content': self.getFileContent(newItem.b_path)
                     })
                 else:
-                    self.patchData[db]['new'].insert(0, {
-                        'file': 'new schema ' + db,
-                        'content': 'CREATE SCHEMA IF NOT EXISTS ' + db + ';'
-                    })
+                    self.patchData[db] = {
+                        'new': [],
+                        'update': [],
+                        'delete': []
+                    }
+                        
                     self.patchData[db]['new'].append({
                         'file': newItem.b_path,
                         'content': self.getFileContent(newItem.b_path)
@@ -528,7 +551,7 @@ class Database:
     
     def pushChangesToPatchFile(self, next):
         patchPath = self.getPatchName(next)
-        for db in self.databases:
+        for db in self.patchData.keys():
             patchName = patchPath.split('/')[-1]
             self.registerPatch(patchName, db)
 
@@ -540,7 +563,12 @@ class Database:
 
                 with open(fileName, mode) as f:
                     for changeType in ['delete', 'new', 'update']:
+                        isFirst = True
                         for dataDict in self.patchData[db][changeType]:
+                            if isFirst:
+                                isFirst = False
+                            else:
+                                f.write('\n\n')
                             f.write('-- ' + dataDict['file'] + '\n')
                             f.write(re.sub('\n\n+', '\n\n', dataDict['content']))
         
@@ -554,6 +582,22 @@ class Database:
 
         for newItem in diffIndex.iter_change_type('M'):
             if directory is 'tables':
+                if newItem.b_path != newItem.a_path:
+                    db = newItem.b_path.split('/')[0]
+                    if db not in self.patchData:
+                        self.patchData[db] = {
+                            'new': [],
+                            'update': [],
+                            'delete': []
+                        }
+                    self.patchData[db]['new'].append({
+                        'file': newItem.b_path,
+                        'content': self.getFileContent(newItem.b_path)
+                    })
+                    print ('testing ', newItem.b_path, newItem.a_path)
+                    continue
+                else:
+                    print ('testing2 ', newItem.b_path, newItem.a_path)
                 addToPatch = self.checkTableDiff(newItem, newItem.b_path)
                 if addToPatch:
                     db = newItem.b_path.split('/')[0]
@@ -563,10 +607,12 @@ class Database:
                             'content': addToPatch
                         })
                     else:
-                        self.patchData[db]['new'].insert(0, {
-                            'file': 'new schema ' + db,
-                            'content': 'CREATE SCHEMA IF NOT EXISTS ' + db + ';'
-                        })
+                        self.patchData[db] = {
+                            'new': [],
+                            'update': [],
+                            'delete': []
+                        }
+
                         self.patchData[db]['update'].append({
                             'file': newItem.b_path,
                             'content': addToPatch
@@ -652,6 +698,7 @@ class Database:
             else:
                 el_clear = "".join(el_clear.split())
                 remainingFilePartsTarget[el_clear] = el
+                # createTableTarget = ''
 
         # split the create table into column definitions. Strip whitespace for eaier comparison        
         createTableColumnsCurrent = createTableCurrent.split(',')
@@ -659,16 +706,17 @@ class Database:
         checkTableColumnsTarget = [''.join(c.split()) for c in createTableColumnsTarget]
         checkTableColumnsCurrent = [''.join(c.split()) for c in createTableColumnsCurrent]
         isAltered = False
-        for c in createTableColumnsCurrent:
-            colCheck = ''.join(c.split())
-            if c is not '' and colCheck not in checkTableColumnsTarget:
-                sql += '\tADD COLUMN IF NOT EXISTS ' + c.lstrip() + ',\n'
-                isAltered = True
         
         for c in createTableColumnsTarget:
             colCheck = ''.join(c.split())
             if c is not '' and colCheck not in checkTableColumnsCurrent:
                 sql += '\tDROP COLUMN IF EXISTS ' + c.lstrip().split()[0] + ',\n'
+                isAltered = True
+        
+        for c in createTableColumnsCurrent:
+            colCheck = ''.join(c.split())
+            if c is not '' and colCheck not in checkTableColumnsTarget:
+                sql += '\tADD COLUMN IF NOT EXISTS ' + c.lstrip() + ',\n'
                 isAltered = True
 
         if isAltered:
@@ -776,12 +824,13 @@ class Database:
                 self.createGitDbSchema(dbName)
             
             return True
-        
+        print('[WARNING] database \'%s\' did not initialize git-db tables correctly' % dbName)
         return False
 
     def createGitDbSchema(self, name):
         connection = self.connections[name]
  
+        print('creating git_db schema in database \'%s\'' % name)
         connection.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         cursor = connection.cursor()
         cursor.execute("CREATE SCHEMA IF NOT EXISTS git_db;")
@@ -807,6 +856,7 @@ class Database:
                 applied_timestamp timestamp
             );
         ''')
+        connection.commit()
 
     def replaceWildcards(self, name):
         r = git.Repo()
@@ -822,6 +872,7 @@ class Database:
     def addQueriesToPatch(self):
         patchPath = self.getPatchName(False)
         for dbName, connection in self.connections.items():
+            self.registerPatch(patchName, db)
             patchName = patchPath.split('/')[-1]
             queryFiles, fileIds = self.getQueryFilesForPatch(connection, patchName)
             for f in queryFiles:
@@ -890,7 +941,7 @@ class Database:
         cursor.execute('''SELECT q.path, q.id
             FROM git_db.query q
             LEFT JOIN git_db.patch p ON p.id = q.applied_patch_id
-            WHERE p.id IS NULL OR p.id = %d
+            WHERE (p.id IS NULL OR p.id = %d) AND q.applied = FALSE
             ORDER BY q.timestamp ASC;''' % self.patchId)
         records = cursor.fetchall()
         return [r[0] for r in records], [r[1] for r in records]
@@ -905,6 +956,7 @@ class Database:
             record = cursor.fetchone()
 
             if record is None:
+                print('registering patch \'%s\' for database \'%s\'', patchName, dbName)
                 cursor.execute('INSERT INTO git_db.patch (name) VALUES(\'%s\') RETURNING id' % patchName)
                 record = cursor.fetchone()
 
@@ -922,3 +974,21 @@ class Database:
         print(queryRecordIds, self.patchId)
         cursor.execute('UPDATE git_db.query SET applied_patch_id = %d WHERE id IN (%s)' 
             % (self.patchId, ','.join([str(q) for q in queryRecordIds])) )
+
+    def registerExistingFiles(self, patchName, dbName):
+        for (dirpath, dirnames, filenames) in os.walk(dbName + '/queries'):
+            for f in filenames:
+                path = '/'.join(dirpath.split('/'))[2:]
+                timestamp = str(int(time()))
+        
+                context = {
+                    'database': dbName,
+                    'record': {
+                        'name': '\'' + f + '\'',
+                        'path': '\'' + dirpath + '\'',
+                        'timestamp': 'to_timestamp(' + timestamp + ')',
+                        'namespace': '\'' + path + '\''
+                    }
+                }
+                self.registerQuery(context)
+                print("new query file was registered: '" + f + "'")
