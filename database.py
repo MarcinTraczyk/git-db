@@ -1,8 +1,12 @@
 import psycopg2
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+from time import time
 import subprocess
 import os
 import git
 import re
+import getpass
+import shutil
 
 class Database:
     def __init__(self):
@@ -19,6 +23,7 @@ class Database:
             self.config['database_branch_prefix'] = rw.get_value(sectionName, 'databasebranchprefix', '')
             self.config['database'] = rw.get_value(sectionName, 'database', '')
             self.config['default_database'] = rw.get_value(sectionName, 'defaultdatabase', '')
+            self.config['store_migrations'] = rw.get_value(sectionName, 'storemigrations', '')
             rw.release()
         self.connection = None
 
@@ -31,6 +36,7 @@ class Database:
         rw.set_value(sectionName, 'configsectionprefix', 'database')
         rw.set_value(sectionName, 'databasebranchprefix', 'database')
         rw.set_value(sectionName, 'database', 'pgsql')
+        rw.set_value(sectionName, 'storemigrations', 'database')
         rw.release()
     
     def run(self, key, argv):
@@ -38,6 +44,8 @@ class Database:
             'init': self.init,
             'database': self.database,
             'remote': self.remote,
+            'patch': self.patch,
+            'query': self.query
         }
         functionCall = switch.get(key)
         if functionCall is None:
@@ -54,8 +62,7 @@ class Database:
             print('TODO output: 1 database command: some usage info')
             exit(0)
         switch = {
-            'add': self.remote_add,
-            'patch': self.remote_patch
+            'add': self.remote_add
         }
         functionCall = switch.get(argv[0])
         if functionCall is None:
@@ -82,36 +89,62 @@ class Database:
         rw.release()
         print("Branch '" + branch + "' set to track database '" + name + "'")
     
-    def remote_patch(self, argv):
-        useNextNumber = False if '--overwrite' in argv else True
-        # read patch target (database the patch is for) from branch config
-        self.setPatchTarget()
-        # initialize patch data
-        self.patchData = {
-            'new': {},
-            'delete': {},
-            'update': {}
+    def patch(self, argv):
+        if len(argv) < 1 or argv[0] == '--help':
+            print('TODO output: 1 database command: some usage info')
+            exit(0)
+        switch = {
+            'create': self.patch_create,
+            # 'migration': self.patch_make_migration
         }
-        # first look at new files and add them to patchData
-        self.addNewFilesToPatch('tables')
-        self.addDeletedFilesToPatch('tables')
-        self.addAlteredFilesToPatch('tables')
+        functionCall = switch.get(argv[0])
+        if functionCall is None:
+            print("TODO output 55 4343 some helpful message")
+            return
+        return functionCall(argv[1:])
+
+    # --------------------------------------------------------------
+    # -------------------------- git db query ----------------------
+    # --------------------------------------------------------------
+
+    def query(self, argv):
+        r = git.Repo()
+        rw = r.config_reader()
+        if len(argv) < 1 or argv[0] == '--help':
+            print('usage: git db query <database name>')
+            exit(0)
+        database = argv[0]
+
+        name = rw.get_value('git_db', 'query_name', '{branch}/{timestamp}.sql')
+        name, timestamp = self.replaceWildcards(name)
+
+        nameArray = str.split(name, '/')
+        subdir = None
+        if len(nameArray) > 1:
+            name = nameArray[-1]
+            subdir = '/'.join(nameArray[:-1])
+
+        queryPath = database + '/queries'
+        if subdir is not None:
+            queryPath += '/' + subdir
+        if not os.path.exists(queryPath):
+            os.makedirs(queryPath)
+            
+        filePath = queryPath + '/' + name
+        os.system('touch ' + filePath)
         
-        mode = 'w'
-        if self.checkPatchData():
-            self.pushChangesToPatchFile(useNextNumber, mode)
-            mode = 'a'
-            useNextNumber = False
-
-        # TODO: add more than tables like so:
-        # self.addNewFilesToPatch('views')
-        # self.addDeletedFilesToPatch('views')
-        # self.addAlteredFilesToPatch('views')
-        # self.pushChangesToPatchFile(useNextNumber, useNextNumber, mode)
-
-        if (mode == 'w'):
-            print("Nothing to patch")
-
+        context = {
+            'database': database,
+            'record': {
+                'name': '\'' + name + '\'',
+                'path': '\'' + queryPath + '/' + name + '\'',
+                'timestamp': 'to_timestamp(' + timestamp + ')',
+                'namespace': '\'' + subdir + '\''
+            }
+        }
+        self.setPatchTarget()
+        self.registerQuery(context)
+        print("new query file was created: '" + filePath + "'")
     # --------------------------------------------------------------
     # -------------------------- git db database -------------------
     # --------------------------------------------------------------
@@ -172,7 +205,7 @@ class Database:
             print("\r\n======== Connected to: '" + conn + '" ========')
             for schema in schemas:
                 print("Fetching table structure for: '" + schema + "'")
-                self.createTabletructure(conn, schema)
+                self.createTableStructure(conn, schema)
         r = git.Repo()
         if len(r.index.diff(None)) == 0 and len(r.untracked_files) == 0:
             print('\n\nNothing to commit')
@@ -181,6 +214,11 @@ class Database:
             r.git.commit('-m', message)
     
     def database_add(self, argv):
+        setAsDefault = False
+        if '--default' in argv:
+            setAsDefault = True
+            argv.remove('--default')
+
         # two arguments are needed: name and address of the database
         if len(argv) < 2 or argv[0] == '--help':
             print('TODO output: 1 database command: some usage info')
@@ -203,10 +241,10 @@ class Database:
             rw.set_value(sectionName, 'user', argv[2])
         if len(argv) > 3:
             rw.set_value(sectionName, 'password', argv[3])
-        # save buffer and release file handle
-
-        if '--default' in argv:
+        if setAsDefault:
             rw.set_value('git-db', 'defaultdatabase', name)
+        
+         # save buffer and release file handle
         rw.release()
         return 0
 
@@ -232,9 +270,8 @@ class Database:
         if len(argv) < 1 or argv[0] == '--help':
             print('TODO output: 3567 database command: some usage info')
             exit(0)
-        patchName = argv[0]
 
-        name = argv[0]
+        patchName = argv[0]
         url, port, username, password = self.getDatabaseConnectionInfo('local')
         connection = self.connect(url, port, username, password)
         cursor = connection.cursor()
@@ -252,7 +289,93 @@ class Database:
             print ('PGSQL error message: \n\n' + e.pgerror + '\n')
             cursor.execute('ROLLBACK;')
             pass
+
+    # --------------------------------------------------------------
+    # -------------------------- git db patch ----------------------
+    # --------------------------------------------------------------
     
+    def patch_create(self, argv):
+        useNextNumber = True 
+        if '--overwrite' in argv:
+            useNextNumber = False
+            self.deletePatchFiles()
+            argv.remove('--overwrite')
+        # read patch target (database the patch is for) from branch config
+        if len(argv) > 0 and argv[0] != '--help':
+            self.patchTarget = argv[0]
+        else:
+            self.setPatchTarget()
+        
+        dbName = self.getDatabaseFromPatchTarget()
+        url, port, username, password = self.getDatabaseConnectionInfo(dbName)
+        connection = self.connect(url, port, username, password)
+        cursor = connection.cursor()
+        self.setDatabases(cursor)
+        self.resetPatchData()
+        self.setDatabaseConnections(self.getDatabaseFromPatchTarget())
+
+        # first look at new files and add them to patchData
+        self.addNewFilesToPatch('tables')
+        self.addDeletedFilesToPatch('tables')
+        self.addAlteredFilesToPatch('tables')
+        dbNeedsPatch = False
+        if self.checkPatchData():
+            self.pushChangesToPatchFile(useNextNumber)
+            dbNeedsPatch = True
+            useNextNumber = False
+
+        # TODO: add more than tables like so:
+        # self.addNewFilesToPatch('views')
+        # self.addDeletedFilesToPatch('views')
+        # self.addAlteredFilesToPatch('views')
+        # if self.checkPatchData():
+        #     self.pushChangesToPatchFile(useNextNumber)
+        #     dbNeedsPatch = True
+        #     useNextNumber = False
+
+        self.addQueriesToPatch()
+        if self.checkPatchData():
+            self.pushChangesToPatchFile(useNextNumber)
+            dbNeedsPatch = True
+            useNextNumber = False
+
+        if dbNeedsPatch:
+            fileName = self.getPatchName(False)
+            print("Patch created: " + fileName)
+        else:
+            print("Nothing to patch")
+
+
+    # def patch_make_migration(self, argv):
+    #     patches = None
+    #     self.patchTarget = None
+    #     if '--all' in argv:
+    #         # TODO get all patches
+    #         patches = next(os.walk('patches'))[1]
+    #         argv.remove('--all')
+    #     elif '--current' in argv:
+    #         # TODO get all patches
+    #         patches = ['current']
+    #         argv.remove('--current')
+    #     elif len(argv) == 2:
+    #         patches = [argv[1]]
+    #     elif len(argv) == 1:
+    #         patches = [argv[0]]
+        
+    #     if len(argv) == 2:
+    #         self.patchTarget = [argv[0]]
+    #     elif len(argv) == 0:
+    #         self.setPatchTarget()
+
+    #     if self.patchTarget is None or patches is None:
+    #         print('TODO output: 154567 database command: some usage info')
+    #         exit(0)
+
+    #     print(patches, self.patchTarget)
+    # def patch_apply(self, argv):
+    #     # if migrations are stored in the database create the git_db schema
+    #     if self.config['store_migrations'] == 'database':
+    #         self.createGitDbSchema(name)
     # --------------------------------------------------------------
     # -------------------------- util functions --------------------
     # --------------------------------------------------------------
@@ -280,8 +403,8 @@ class Database:
         # url is mandatory
         url = rw.get_value(sectionName, 'url', '')
         if len(rw.get_value(sectionName, 'url', '')) == 0:
-            print('Database "' + argv[0] + '" does not exists')
-            return None
+            print('Database "' + name + '" does not exists')
+            exit(1)
         
         port = rw.get_value(sectionName, 'port', '')
         # default PgSQL port, if not specified directly
@@ -294,7 +417,7 @@ class Database:
         
         password = rw.get_value(sectionName, 'password', '')
         if len(password) == 0:
-            password = input('password:')
+            password = getpass.getpass()
         
         self.connection_info = {
             'host': url, 
@@ -349,13 +472,13 @@ class Database:
 
     def createSchemaDirectories(self, connection, schemas):
         for s in schemas:
-            if os.path.exists(connection + '/' + s):
+            if os.path.exists(connection + '/structure/' + s):
                 print("Schema '" + s + "' in '" + connection + "' already exists")
             else :
                 os.makedirs(connection + '/structure/' + s)
         return
 
-    def createTabletructure(self, conn, schema):
+    def createTableStructure(self, conn, schema):
         tables = self.getTables(conn, schema)
         path = "%s/structure/%s/tables" % (conn, schema)
         if not os.path.exists(path):
@@ -375,13 +498,27 @@ class Database:
     
     def addNewFilesToPatch(self, directory):
         r = git.Repo()
-        currentCommit = r.commit("local")
+        currentCommit = r.commit(r.active_branch.name)
         remoteCommit = r.commit(self.patchTarget)
         diffIndex = remoteCommit.diff(currentCommit)
 
         for newItem in diffIndex.iter_change_type('A'):
-            print (newItem.b_path)
-            self.patchData['new'][newItem.b_path] = self.getFileContent(newItem.b_path)
+            if re.match('^([^\/]*\/){3}' + directory + '\/.*', newItem.b_path):
+                db = newItem.b_path.split('/')[0]
+                if db in self.patchData.keys():
+                    self.patchData[db]['new'].append({
+                        'file': newItem.b_path,
+                        'content': self.getFileContent(newItem.b_path)
+                    })
+                else:
+                    self.patchData[db]['new'].insert(0, {
+                        'file': 'new schema ' + db,
+                        'content': 'CREATE SCHEMA IF NOT EXISTS ' + db + ';'
+                    })
+                    self.patchData[db]['new'].append({
+                        'file': newItem.b_path,
+                        'content': self.getFileContent(newItem.b_path)
+                    })
     
     def getFileContent(self, filePath):
         s = ''
@@ -389,17 +526,29 @@ class Database:
             s = f.read()
         return s
     
-    def pushChangesToPatchFile(self, next, mode='w'):
-        fileName = self.getPatchName(next)
-        with open(fileName, mode) as f:
-            for changeType in ['delete', 'new', 'update']:
-                for key, data in self.patchData[changeType].items():
-                    f.write('-- ' + key + '\n')
-                    f.write(re.sub('\n\n+', '\n\n', data))
+    def pushChangesToPatchFile(self, next):
+        patchPath = self.getPatchName(next)
+        for db in self.databases:
+            patchName = patchPath.split('/')[-1]
+            self.registerPatch(patchName, db)
+
+            if self.checkPatchDataDb(db):
+                mode = 'w'
+                fileName = patchPath + '/' + db + '.sql'
+                if os.path.exists(fileName):
+                    mode = 'a'
+
+                with open(fileName, mode) as f:
+                    for changeType in ['delete', 'new', 'update']:
+                        for dataDict in self.patchData[db][changeType]:
+                            f.write('-- ' + dataDict['file'] + '\n')
+                            f.write(re.sub('\n\n+', '\n\n', dataDict['content']))
+        
+        self.resetPatchData()
     
     def addAlteredFilesToPatch(self, directory):
         r = git.Repo()
-        currentCommit = r.commit("local")
+        currentCommit = r.commit(r.active_branch.name)
         remoteCommit = r.commit(self.patchTarget)
         diffIndex = remoteCommit.diff(currentCommit)
 
@@ -407,14 +556,28 @@ class Database:
             if directory is 'tables':
                 addToPatch = self.checkTableDiff(newItem, newItem.b_path)
                 if addToPatch:
-                    self.patchData['update'][newItem.b_path] = addToPatch
-            else:
-                self.patchData['update'][newItem.b_path] = self.getFileContent(newItem.b_path)
+                    db = newItem.b_path.split('/')[0]
+                    if db in self.patchData:
+                        self.patchData[db]['update'].append({
+                            'file': newItem.b_path,
+                            'content': addToPatch
+                        })
+                    else:
+                        self.patchData[db]['new'].insert(0, {
+                            'file': 'new schema ' + db,
+                            'content': 'CREATE SCHEMA IF NOT EXISTS ' + db + ';'
+                        })
+                        self.patchData[db]['update'].append({
+                            'file': newItem.b_path,
+                            'content': addToPatch
+                        })
+            # else:
+                # self.patchData['update'][newItem.b_path] = self.getFileContent(newItem.b_path)
         return
     
     def addDeletedFilesToPatch(self, directory):
         r = git.Repo()
-        currentCommit = r.commit("local")
+        currentCommit = r.commit(r.active_branch.name)
         remoteCommit = r.commit(self.patchTarget)
         diffIndex = remoteCommit.diff(currentCommit)
 
@@ -426,8 +589,12 @@ class Database:
 
                 tableName = pathArray[-3] + '\.' \
                     + pathArray[-1].split('.')[0]
-                self.patchData['delete'][removedItem.a_path] = \
-                    'DROP TABLE IF EXISTS ' + tableName.replace('\.', '.') + ';\n\n'
+                db = pathArray[0]
+                if db in self.patchData:
+                    self.patchData[db]['delete'].append({
+                        'file': removedItem.a_path,
+                        'content': 'DROP TABLE IF EXISTS ' + tableName.replace('\.', '.') + ';\n\n'
+                    })
         return
     
     def checkTableDiff(self, itemBlob, filePath):
@@ -570,17 +737,188 @@ class Database:
         if number is None:
             print('Patch number could not be calculated')
             exit(1)
+
         if not os.path.exists('patches'):
             os.mkdir('patches')
 
         rw.set_value(sectionName, 'current', number)
-        filePath = 'patches/patch_%s.sql' % number
+
+        filePath = 'patches/patch_%s' % number
+        if not os.path.exists(filePath):
+            os.mkdir(filePath)
+        
         rw.release()
         return filePath
     
     def checkPatchData(self):
+        for db in self.databases:
+            for key in ['new', 'delete', 'update']:
+                if len(self.patchData[db][key]) > 0:
+                    return True
+        return False
+    
+    def checkPatchDataDb(self, dbName):
         for key in ['new', 'delete', 'update']:
-            if len(self.patchData[key]) > 0:
+            if len(self.patchData[dbName][key]) > 0:
                 return True
+        return False
+
+    def checkGitDbInitialized(self, dbName):
+        if dbName in self.connections.keys():
+            connection = self.connections[dbName]
+            cursor = connection.cursor()
+            cursor.execute('''SELECT schema_name 
+                FROM information_schema.schemata 
+                WHERE schema_name = 'git_db' ''')
+            
+            record = cursor.fetchone()
+            if record is None:
+                self.createGitDbSchema(dbName)
+            
+            return True
         
         return False
+
+    def createGitDbSchema(self, name):
+        connection = self.connections[name]
+ 
+        connection.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        cursor = connection.cursor()
+        cursor.execute("CREATE SCHEMA IF NOT EXISTS git_db;")
+
+        cursor = connection.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS git_db.query (
+                id SERIAL NOT NULL,
+                name VARCHAR(128) NOT NULL,
+                namespace VARCHAR(128) NOT NULL,
+                path VARCHAR(256) NOT NULL,
+                timestamp timestamp DEFAULT CURRENT_TIMESTAMP,
+                applied BOOLEAN DEFAULT FALSE,
+                applied_timestamp timestamp,
+                applied_patch_id INT
+            );
+
+            CREATE TABLE IF NOT EXISTS git_db.patch (
+                id SERIAL NOT NULL,
+                name VARCHAR(128) NOT NULL,
+                timestamp timestamp DEFAULT CURRENT_TIMESTAMP,
+                applied BOOLEAN DEFAULT FALSE,
+                applied_timestamp timestamp
+            );
+        ''')
+
+    def replaceWildcards(self, name):
+        r = git.Repo()
+        branch = r.active_branch.name
+
+        timestamp = str(int(time()))
+
+        branch = branch.replace('/', '_')
+        name = name.replace('{branch}', branch)
+        name = name.replace('{timestamp}', timestamp)
+        return name, timestamp
+    
+    def addQueriesToPatch(self):
+        patchPath = self.getPatchName(False)
+        for dbName, connection in self.connections.items():
+            patchName = patchPath.split('/')[-1]
+            queryFiles, fileIds = self.getQueryFilesForPatch(connection, patchName)
+            for f in queryFiles:
+                self.patchData[dbName]['new'].append({
+                    'file': f,
+                    'content': self.getFileContent(f)
+                })
+            self.registerQueryFilesInPatch(dbName, fileIds)
+        return
+
+    def getCurrentDb(self, databaseName):
+        url, port, username, password = self.getDatabaseConnectionInfo(self.getDatabaseFromPatchTarget())
+        connection = self.connect(url, port, username, password, databaseName)
+        cursor = connection.cursor()
+        return connection, cursor
+
+    def registerQuery(self, context):
+        connection, cursor = self.getCurrentDb(context['database'])
+
+        contextSet = set(context['record'])
+        recordSet = set(['name', 'namespace', 'path', 'timestamp', 'applied', 'applied_timestamp', 'applied_patch_id'])
+        recordSet = recordSet.intersection(contextSet)
+
+        query = "INSERT INTO git_db.query ("
+        params = []
+        for column in recordSet:
+            query += column + ', '
+            params.append(context['record'][column])
+        query = query.rstrip(', ')
+        query += ') VALUES ('
+        for i in range(len(recordSet)):
+            query += '%s, '
+        query = query.rstrip(', ')
+        query += ') RETURNING id;'
+
+        cursor.execute(query % tuple(params))
+        record = cursor.fetchone()
+        cursor.close()
+        connection.commit()
+        print ('query file registered in the database \'' + self.getDatabaseFromPatchTarget() \
+            + '.' + context['database'] + '.git_db.query\', under id=' + str(record[0]))
+        return
+
+    def getDatabaseFromPatchTarget(self):
+        dbName = self.patchTarget
+        dbName.lstrip(self.config['database_branch_prefix'] + '/')
+        return dbName.lstrip(self.config['database_branch_prefix'] + '/')
+        
+    def resetPatchData(self):
+        self.patchData = {}
+        for db in self.databases:
+            self.patchData[db] = {
+                'new': [],
+                'delete': [],
+                'update': []
+            }
+        return
+    
+    def deletePatchFiles(self):
+        patchPath = self.getPatchName(False)
+        shutil.rmtree(patchPath)
+        return
+
+    def getQueryFilesForPatch(self, connection, patchName):
+        cursor = connection.cursor()
+        cursor.execute('''SELECT q.path, q.id
+            FROM git_db.query q
+            LEFT JOIN git_db.patch p ON p.id = q.applied_patch_id
+            WHERE p.id IS NULL OR p.id = %d
+            ORDER BY q.timestamp ASC;''' % self.patchId)
+        records = cursor.fetchall()
+        return [r[0] for r in records], [r[1] for r in records]
+    
+    def registerPatch(self, patchName, dbName):
+        if (self.checkGitDbInitialized(dbName)):
+            connection = self.connections[dbName]
+            cursor = connection.cursor()
+            cursor.execute('''SELECT id 
+                FROM git_db.patch 
+                WHERE name = '%s' ''' % patchName)
+            record = cursor.fetchone()
+
+            if record is None:
+                cursor.execute('INSERT INTO git_db.patch (name) VALUES(\'%s\') RETURNING id' % patchName)
+                record = cursor.fetchone()
+
+            self.patchId = record[0]
+            connection.commit()    
+            return True
+        
+        return False
+    
+    def registerQueryFilesInPatch(self, dbName, queryRecordIds):
+        if (len(queryRecordIds) == 0):
+            return
+        connection = self.connections[dbName]
+        cursor = connection.cursor()
+        print(queryRecordIds, self.patchId)
+        cursor.execute('UPDATE git_db.query SET applied_patch_id = %d WHERE id IN (%s)' 
+            % (self.patchId, ','.join([str(q) for q in queryRecordIds])) )
