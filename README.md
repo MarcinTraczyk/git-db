@@ -70,7 +70,7 @@ CREATE TABLE auth."user" (
     first_name character verying(128)
 );
 ```
-I commit this changes:
+I commit these changes:
 ```bash
 git add .
 git commit -m 'add a column'
