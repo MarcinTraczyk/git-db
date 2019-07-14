@@ -62,14 +62,14 @@ class Database:
 
     def remote(self, argv):
         if len(argv) < 1 or argv[0] == '--help':
-            print('TODO output: 1 database command: some usage info')
+            print('usage: git db remote add <name>')
             exit(0)
         switch = {
             'add': self.remote_add
         }
         functionCall = switch.get(argv[0])
         if functionCall is None:
-            print("TODO output 55 some helpful message")
+            print("'" + argv[0] + "' is not a git-db function. See 'git-db --help'")
             return
         return functionCall(argv[1:])
 
@@ -94,7 +94,7 @@ class Database:
     
     def patch(self, argv):
         if len(argv) < 1 or argv[0] == '--help':
-            print('TODO output: 1 database command: some usage info')
+            print("No git-db patch function selected. See 'git-db --help'")
             exit(0)
         switch = {
             'create': self.patch_create,
@@ -102,7 +102,7 @@ class Database:
         }
         functionCall = switch.get(argv[0])
         if functionCall is None:
-            print("TODO output 55 4343 some helpful message")
+            print("'" + argv[0] + "' is not a git-db patch function. See 'git-db --help'")
             return
         return functionCall(argv[1:])
 
@@ -154,7 +154,7 @@ class Database:
 
     def database(self, argv):
         if len(argv) < 1 or argv[0] == '--help':
-            print('TODO output: 1 database command: some usage info')
+            print("No git-db database function selected. See 'git-db --help'")
             exit(0)
         switch = {
             'add': self.database_add,
@@ -163,7 +163,7 @@ class Database:
         }
         functionCall = switch.get(argv[0])
         if functionCall is None:
-            print("TODO output some helpful message")
+            print("'" + argv[0] + "' is not a git-db database function. See 'git-db --help'")
             return
         return functionCall(argv[1:])
     
@@ -224,7 +224,7 @@ class Database:
 
         # two arguments are needed: name and address of the database
         if len(argv) < 2 or argv[0] == '--help':
-            print('TODO output: 1 database command: some usage info')
+            print('usage: git db database add <name> <host:port> <user> <password>')
             exit(0)
         name = argv[0]
         # based on how remotes are stored
@@ -254,7 +254,7 @@ class Database:
     def database_check(self, argv):
         # two arguments are needed: name and address of the database
         if len(argv) < 1 or argv[0] == '--help':
-            print('TODO output: 1 database command: some usage info')
+            print('usage: git db database check <database name>')
             exit(0)
         name = argv[0]
         url, port, username, password = self.getDatabaseConnectionInfo(name)
