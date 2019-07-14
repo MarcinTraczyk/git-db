@@ -24,8 +24,9 @@ class Database:
             self.config['database'] = rw.get_value(sectionName, 'database', '')
             self.config['default_database'] = rw.get_value(sectionName, 'defaultdatabase', '')
             self.config['store_migrations'] = rw.get_value(sectionName, 'storemigrations', '')
+            # TODO: implement ignore options
             self.config['ignore_db'] = rw.get_value(sectionName, 'ignoredb', '')
-            self.config['ignore_schema'] = rw.get_value(sectionName, 'ignoredb', 'git_db')
+            self.config['ignore_schema'] = rw.get_value(sectionName, 'ignoreschema', 'git_db')
             rw.release()
         self.connection = None
 
@@ -98,7 +99,6 @@ class Database:
         switch = {
             'create': self.patch_create,
             'apply': self.patch_apply
-            # 'migration': self.patch_make_migration
         }
         functionCall = switch.get(argv[0])
         if functionCall is None:
@@ -284,7 +284,6 @@ class Database:
             self.patchTarget = argv[0]
         else:
             self.setPatchTarget()
-        
         dbName = self.getDatabaseFromPatchTarget()
         url, port, username, password = self.getDatabaseConnectionInfo(dbName)
         connection = self.connect(url, port, username, password)
@@ -348,7 +347,7 @@ class Database:
             print ('[Abort]')
             exit(0)
 
-        url, port, username, password = self.getDatabaseConnectionInfo('local')
+        url, port, username, password = self.getDatabaseConnectionInfo(connectionName)
         conn = self.connect(url, port, username, password)
         cursor = conn.cursor()
         self.setDatabases(cursor)
@@ -360,17 +359,30 @@ class Database:
             if ext == 'sql' and name not in self.connections.keys():
                 conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
                 cursor = conn.cursor()
+                print ('[INFO] creating database \'%s\'' % name)
                 cursor.execute("CREATE DATABASE %s;" % name)
                 self.setDatabases(cursor)
                 self.setDatabaseConnections(connectionName)
                 self.registerPatch(patchName, name)
                 self.registerExistingFiles(patchName, name)
+
+        for f in os.listdir('patches/'+ patchName):
+            ext = f.split('.')[-1]
+            name = f.split('.')[0]
+            if name in self.connections.keys():
+                c = self.connections[name]
+                for d in os.listdir(name + '/structure'):
+                    cr = c.cursor()
+                    print ('[INFO] creating schema \'%s\' for database \'%s\'' 
+                        % (d, name))
+                    cr.execute("CREATE SCHEMA IF NOT EXISTS %s;" % d)
+                c.commit()
                 
         for dbName, connection in self.connections.items():
             patchFilePath = 'patches/' + patchName + '/' + dbName + '.sql'
             if (os.path.exists(patchFilePath)):
                 cursor = connection.cursor()
-                print('\n\nApplying patch file \'%s\'' % patchFilePath)
+                print('\n\n[INFO] Applying patch file \'%s\'' % patchFilePath)
                     
                 command = 'BEGIN;\n'
                 command += self.getFileContent(patchFilePath) + '\n'
@@ -388,11 +400,11 @@ class Database:
                             SELECT id FROM git_db.patch WHERE name = %s
                         );''', (patchName, patchName))
                     connection.commit()
-                    print ('...ok')
+                    print ('[INFO]...ok')
                 except psycopg2.Error as e:
-                    print ('Error applying patch')
-                    print ('PGSQL error code: ' + e.pgcode)
-                    print ('PGSQL error message:' 
+                    print ('[ERROR] Error applying patch')
+                    print ('[ERROR]PGSQL error code: ' + e.pgcode)
+                    print ('[ERROR]PGSQL error message:' 
                         + '\n----------------\n' 
                         + e.pgerror 
                         + '----------------')
@@ -404,6 +416,8 @@ class Database:
 
     def connect(self, url, port, user, password, database=None):
         try:
+            if database is None:
+                database = 'postgres'
             return psycopg2.connect(host=url, 
                 port=port,
                 user=user,
@@ -411,9 +425,9 @@ class Database:
                 database=database)
         except:
             if database is not None:
-                print("I am unable to connect to the database '" + database + "'")
+                print("[ERROR] I am unable to connect to the database '" + database + "'")
             else:
-                print("I am unable to connect to the database")
+                print("[ERROR] I am unable to connect to the database")
             exit(1)
     
     def getDatabaseConnectionInfo(self, name):
@@ -425,7 +439,7 @@ class Database:
         # url is mandatory
         url = rw.get_value(sectionName, 'url', '')
         if len(rw.get_value(sectionName, 'url', '')) == 0:
-            print('Database "' + name + '" does not exists')
+            print('[ERROR] Database "' + name + '" does not exists')
             exit(1)
         
         port = rw.get_value(sectionName, 'port', '')
@@ -457,7 +471,7 @@ class Database:
     def createDbDirectories(self, cursor):
         for s in self.databases:
             if os.path.exists(s):
-                print("Schema '" + s + "' already exists")
+                print("[INFO] Schema '" + s + "' already exists")
             else :
                 os.makedirs(s)
         return
@@ -494,9 +508,15 @@ class Database:
     def createSchemaDirectories(self, connection, schemas):
         for s in schemas:
             if os.path.exists(connection + '/structure/' + s):
-                print("Schema '" + s + "' in '" + connection + "' already exists")
+                print("[INFO] Schema '" + s + "' in '" + connection + "' already exists")
             else :
                 os.makedirs(connection + '/structure/' + s)
+                os.system('touch ' + connection + '/structure/' + s + '/.gitkeep')
+
+        if not os.path.exists(connection + '/queries/' + s):
+            os.makedirs(connection + '/queries/')
+            os.system('touch ' + connection + '/queries/.gitkeep')
+        
         return
 
     def createTableStructure(self, conn, schema):
@@ -522,7 +542,6 @@ class Database:
         currentCommit = r.commit(r.active_branch.name)
         remoteCommit = r.commit(self.patchTarget)
         diffIndex = remoteCommit.diff(currentCommit)
-
         for newItem in diffIndex.iter_change_type('A'):
             if re.match('^([^\/]*\/){3}' + directory + '\/.*', newItem.b_path):
                 db = newItem.b_path.split('/')[0]
@@ -554,7 +573,6 @@ class Database:
         for db in self.patchData.keys():
             patchName = patchPath.split('/')[-1]
             self.registerPatch(patchName, db)
-
             if self.checkPatchDataDb(db):
                 mode = 'w'
                 fileName = patchPath + '/' + db + '.sql'
@@ -594,10 +612,7 @@ class Database:
                         'file': newItem.b_path,
                         'content': self.getFileContent(newItem.b_path)
                     })
-                    print ('testing ', newItem.b_path, newItem.a_path)
                     continue
-                else:
-                    print ('testing2 ', newItem.b_path, newItem.a_path)
                 addToPatch = self.checkTableDiff(newItem, newItem.b_path)
                 if addToPatch:
                     db = newItem.b_path.split('/')[0]
@@ -650,11 +665,11 @@ class Database:
 
         # filter out comments
         currentFileParts = currentFile.split('\n')
-        currentFileParts = [row for row in currentFileParts if not re.match('^\h*--', row)]
+        currentFileParts = [row for row in currentFileParts if not re.match('^[ \t]*--', row)]
         currentFileParts = '\n'.join(currentFileParts)
 
         targetFileParts = targetFile.split('\n')
-        targetFileParts = [row for row in targetFileParts if not re.match('^\h*--', row)]
+        targetFileParts = [row for row in targetFileParts if not re.match('^[ \t]*--', row)]
         targetFileParts = '\n'.join(targetFileParts)
 
         # split both files per-command
@@ -692,7 +707,12 @@ class Database:
 
         for el in targetFileParts:
             el_clear = "".join(el.lower().split('\n'))
-            reObj = re.search('create\s+table\s*' + tableName + '\s*\((.*)\)', el_clear)
+            tableNameArray = tableName.split('\.')
+            regexName = []
+            for el in tableNameArray:
+                regexName.append('\"*\'*\`*' + el + '\"*\'*\`*')
+            regexName = '\.'.join(regexName)
+            reObj = re.search('create\s+table\s*' + regexName + '\s*\((.*)\)', el_clear)
             if reObj:
                 createTableTarget = reObj.group(1)
             else:
@@ -752,7 +772,7 @@ class Database:
             self.patchTarget = rw.get(sectionName, 'database')
             rw.release()
         else:
-            print("Branch '%s' is not tracking any database" % branch)
+            print("[ERROR] Branch '%s' is not tracking any database" % branch)
             rw.release()
             exit(1)
 
@@ -776,14 +796,14 @@ class Database:
             currentNumber = rw.get(sectionName, 'current')
         
         if numberingMethod is None or currentNumber is None:
-            print("Patch numbering method was not selected")
+            print("[WARNING] Patch numbering method was not selected")
         
         number = None
         if numberingMethod == 'simple':
             number = self.getSimplePatchNumber(currentNumber, next)
         
         if number is None:
-            print('Patch number could not be calculated')
+            print('[ERROR] Patch number could not be calculated')
             exit(1)
 
         if not os.path.exists('patches'):
@@ -799,7 +819,7 @@ class Database:
         return filePath
     
     def checkPatchData(self):
-        for db in self.databases:
+        for db in self.patchData:
             for key in ['new', 'delete', 'update']:
                 if len(self.patchData[db][key]) > 0:
                     return True
@@ -830,7 +850,7 @@ class Database:
     def createGitDbSchema(self, name):
         connection = self.connections[name]
  
-        print('creating git_db schema in database \'%s\'' % name)
+        print('[INFO] creating git_db schema in database \'%s\'' % name)
         connection.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         cursor = connection.cursor()
         cursor.execute("CREATE SCHEMA IF NOT EXISTS git_db;")
@@ -869,11 +889,12 @@ class Database:
         name = name.replace('{timestamp}', timestamp)
         return name, timestamp
     
+    
     def addQueriesToPatch(self):
         patchPath = self.getPatchName(False)
         for dbName, connection in self.connections.items():
-            self.registerPatch(patchName, db)
             patchName = patchPath.split('/')[-1]
+            self.registerPatch(patchName, dbName)
             queryFiles, fileIds = self.getQueryFilesForPatch(connection, patchName)
             for f in queryFiles:
                 self.patchData[dbName]['new'].append({
@@ -881,6 +902,23 @@ class Database:
                     'content': self.getFileContent(f)
                 })
             self.registerQueryFilesInPatch(dbName, fileIds)
+        for d in os.listdir('./'):
+            if d not in self.connections.keys() and os.path.exists(d + '/queries'):
+                for (dirpath, dirnames, filenames) in os.walk(d + '/queries'):
+                    for f in filenames:
+                        fullFilePath = dirpath + '/' + f
+                        if d not in self.patchData.keys():
+                            self.patchData[d] = {
+                                'new': [],
+                                'delete': [],
+                                'update': []
+                            }
+                                
+                        self.patchData[d]['new'].append({
+                            'file': fullFilePath,
+                            'content': self.getFileContent(fullFilePath)
+                        })
+
         return
 
     def getCurrentDb(self, databaseName):
@@ -912,14 +950,14 @@ class Database:
         record = cursor.fetchone()
         cursor.close()
         connection.commit()
-        print ('query file registered in the database \'' + self.getDatabaseFromPatchTarget() \
+        print ('[INFO] query file registered in the database \'' + self.getDatabaseFromPatchTarget() \
             + '.' + context['database'] + '.git_db.query\', under id=' + str(record[0]))
         return
 
     def getDatabaseFromPatchTarget(self):
         dbName = self.patchTarget
-        dbName.lstrip(self.config['database_branch_prefix'] + '/')
-        return dbName.lstrip(self.config['database_branch_prefix'] + '/')
+        # strip the prefix and '/'
+        return dbName.lstrip(self.config['database_branch_prefix'])[1:]
         
     def resetPatchData(self):
         self.patchData = {}
@@ -956,7 +994,7 @@ class Database:
             record = cursor.fetchone()
 
             if record is None:
-                print('registering patch \'%s\' for database \'%s\'', patchName, dbName)
+                print('[INFO] registering patch \'%s\' for database \'%s\'' % (patchName, dbName))
                 cursor.execute('INSERT INTO git_db.patch (name) VALUES(\'%s\') RETURNING id' % patchName)
                 record = cursor.fetchone()
 
@@ -964,6 +1002,8 @@ class Database:
             connection.commit()    
             return True
         
+        print ('[WARNING] cannot register patch \'%s\' for database \'%s\'' 
+            % (patchName, dbName))
         return False
     
     def registerQueryFilesInPatch(self, dbName, queryRecordIds):
@@ -971,7 +1011,6 @@ class Database:
             return
         connection = self.connections[dbName]
         cursor = connection.cursor()
-        print(queryRecordIds, self.patchId)
         cursor.execute('UPDATE git_db.query SET applied_patch_id = %d WHERE id IN (%s)' 
             % (self.patchId, ','.join([str(q) for q in queryRecordIds])) )
 
@@ -991,4 +1030,4 @@ class Database:
                     }
                 }
                 self.registerQuery(context)
-                print("new query file was registered: '" + f + "'")
+                print("[INFO] new query file was registered: '" + f + "'")
