@@ -210,11 +210,25 @@ class Database:
                 print("Fetching table structure for: '" + schema + "'")
                 self.createTableStructure(conn, schema)
         r = git.Repo()
-        if len(r.index.diff(None)) == 0 and len(r.untracked_files) == 0:
-            print('\n\nNothing to commit')
+        
+        isFirstCommit = False
+        try:
+            r.index.diff("HEAD")
+            isFirstCommit = False
+        except:
+            isFirstCommit = True
+            pass
+
+        if not isFirstCommit \
+                and len(r.index.diff("HEAD")) == 0 \
+                and len(r.index.diff(None)) == 0 \
+                and len(r.untracked_files) == 0:
+                
+            print('\n\n[Info] Nothing to commit')
         else:
             r.git.add('.')
             r.git.commit('-m', message)
+            print('[Info] database branch updated')
     
     def database_add(self, argv):
         setAsDefault = False
@@ -513,7 +527,7 @@ class Database:
                 os.makedirs(connection + '/structure/' + s)
                 os.system('touch ' + connection + '/structure/' + s + '/.gitkeep')
 
-        if not os.path.exists(connection + '/queries/' + s):
+        if not os.path.exists(connection + '/queries/'):
             os.makedirs(connection + '/queries/')
             os.system('touch ' + connection + '/queries/.gitkeep')
         
@@ -695,10 +709,15 @@ class Database:
         # store everything that is not 'create table' in these array
         remainingFilePartsCurrent = {}
         remainingFilePartsTarget = {}
+        tableNameArray = tableName.split('\.')
+        regexName = []
+        for el in tableNameArray:
+            regexName.append('\"*\'*\`*' + el + '\"*\'*\`*')
+        regexName = '\.'.join(regexName)
 
         for el in currentFileParts:
             el_clear = "".join(el.lower().split('\n'))
-            reObj = re.search('create\s+table\s*' + tableName + '\s*\((.*)\)', el_clear)
+            reObj = re.search('create\s+table\s*' + regexName + '\s*\((.*)\)', el_clear)
             if reObj:
                 createTableCurrent = reObj.group(1)
             else:
@@ -707,11 +726,6 @@ class Database:
 
         for el in targetFileParts:
             el_clear = "".join(el.lower().split('\n'))
-            tableNameArray = tableName.split('\.')
-            regexName = []
-            for el in tableNameArray:
-                regexName.append('\"*\'*\`*' + el + '\"*\'*\`*')
-            regexName = '\.'.join(regexName)
             reObj = re.search('create\s+table\s*' + regexName + '\s*\((.*)\)', el_clear)
             if reObj:
                 createTableTarget = reObj.group(1)
@@ -723,19 +737,33 @@ class Database:
         # split the create table into column definitions. Strip whitespace for eaier comparison        
         createTableColumnsCurrent = createTableCurrent.split(',')
         createTableColumnsTarget = createTableTarget.split(',')
-        checkTableColumnsTarget = [''.join(c.split()) for c in createTableColumnsTarget]
-        checkTableColumnsCurrent = [''.join(c.split()) for c in createTableColumnsCurrent]
+        checkTableColumnsTarget = [' '.join(c.split()) \
+            for c in createTableColumnsTarget]
+        checkTableColumnsCurrent = [' '.join(c.split()) \
+            for c in createTableColumnsCurrent]
         isAltered = False
-        
+
         for c in createTableColumnsTarget:
-            colCheck = ''.join(c.split())
-            if c is not '' and colCheck not in checkTableColumnsCurrent:
-                sql += '\tDROP COLUMN IF EXISTS ' + c.lstrip().split()[0] + ',\n'
+            colName = c.split()[0]
+            
+            if not any(re.match('^' + colName + ' .*', check) for check in checkTableColumnsCurrent):
                 isAltered = True
+                sql += '\tDROP COLUMN IF EXISTS ' + colName + ',\n'
         
         for c in createTableColumnsCurrent:
-            colCheck = ''.join(c.split())
-            if c is not '' and colCheck not in checkTableColumnsTarget:
+            colName = c.split()[0]
+            
+            if any(re.match('^' + colName + ' .*', check) for check in checkTableColumnsTarget):
+                filteredList = filter(lambda x: \
+                    re.match('^' + colName + ' .*', x),\
+                    checkTableColumnsTarget)
+                filteredList = list(filteredList)
+
+                if ''.join(filteredList[0].split()) != ''.join(c.split()):
+                    sql += '\tALTER COLUMN ' + c.lstrip() + ',\n'
+                    isAltered = True
+
+            else:
                 sql += '\tADD COLUMN IF NOT EXISTS ' + c.lstrip() + ',\n'
                 isAltered = True
 
@@ -744,6 +772,7 @@ class Database:
         else:
             sql = ''
         
+
         # whatever remains in the local file and is not identical to the target file
         # should be considered an alteration and added to patch
         isAltered = False
@@ -1017,6 +1046,9 @@ class Database:
     def registerExistingFiles(self, patchName, dbName):
         for (dirpath, dirnames, filenames) in os.walk(dbName + '/queries'):
             for f in filenames:
+                ext = f.split('.')[-1]
+                if ext != 'sql':
+                    continue
                 path = '/'.join(dirpath.split('/'))[2:]
                 timestamp = str(int(time()))
         

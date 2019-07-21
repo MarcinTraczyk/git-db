@@ -31,6 +31,8 @@ Branches prefixes with `database/` are special branches that are used to pull do
 
 # Example
 
+## Basic repo setup
+
 Create an empty directory and initialize a new git-db repo:
 ```bash
 mkdir database-repo
@@ -53,12 +55,20 @@ The script should inform you that it created, and switched to, a new database br
 ```bash
 git checkout -b local
 ```
+and let git db script now this branch, by default, always refers to the "local" database when any database-related command is used:
+```bash
+git db remote add local
+```
+It should display back to you `Branch 'local' set to track database 'local'`. And now both your development `local` branch, and a database branch `database/local`, are set up.
+
+## Commiting changes / creating database patches
+
 The idea behind git-db is to make incremental changes that are easy to track and diff. Open any *.sql file, let's say a table on my database contains this create table definition:
 ```sql
 CREATE TABLE auth."user" (
     id integer NOT NULL,
     username character varying(64) NOT NULL,
-    create_time datetime NOT NULL
+    create_time timestamp NOT NULL
 );
 ```
 and I want to add another column there. To do it I just alter the create table statement like so:
@@ -66,17 +76,57 @@ and I want to add another column there. To do it I just alter the create table s
 CREATE TABLE auth."user" (
     id integer NOT NULL,
     username character varying(64) NOT NULL,
-    create_time datetime NOT NULL,
-    first_name character verying(128)
+    create_time timestamp NOT NULL,
+    first_name character varying(128)
 );
 ```
 I commit these changes:
 ```bash
 git add .
 git commit -m 'add a column'
-git db remote add local
 ```
-and let git db script now this branch, by default, always refers to the "local" database when any database-related command is used:
+Now my development branch `local` defines a different database structure to my actual database, as stored in the `database/local` branch. Let's create a patch file that needs to be applied to the database to make both structures consistent:
 ```bash
-git db remote add local
+git db patch create
 ```
+You should see an information about a patch being created, and a path to where it's stored: `Patch created: patches/patch_1`. It is a path to a directory that stores patch files per database found on the PostgreSQL server. In my case, having a database `auth` on my test server, I see a file: `patches/patch_1/auth.sql`, that contains:
+```sql
+-- auth/structure/auth/tables/user.sql
+ALTER TABLE auth.user
+        ADD COLUMN IF NOT EXISTS first_name character verying(128);
+```
+where there commented part shows the source file responsible for the change. In this case a change in `user.sql` trigger a corresponding `ALTER TABLE (...)` to be added to the patch. 
+> You might also see informations messages like these:
+> ```bash
+> [INFO] creating git_db schema in database 'auth'
+> [INFO] registering patch 'patch_1' for database 'auth'
+> ```
+> or warnings like these:
+> ```bash
+> [WARNING] database 'test' did not initialize git-db tables correctly
+> [WARNING] cannot register patch 'patch_1' for database 'test'
+> [WARNING] database 'test' did not initialize git-db tables correctly
+> [WARNING] cannot register patch 'patch_1' for database 'test'
+> ```
+> Git-db creates a `git_db` schema in each database to track what has been already applied to a database and what has not. If you see warnings informing you that these tables were not initializes correctly it's most likely because you've added a table to a database that does not yet exist, therefore patches cannot be registered when they are created (still, they will get registered when a patch is applied).
+
+If you are happy with the patch file created, you can apply it to you database:
+```bash
+git db patch apply
+```
+As this is a fairly dangerous step (after all you modify your database structure, potentially in a production environment), extra information is displayed back to you, informing you which patch is going to be applied to which of the defined database connections: `Do you want to apply patch 'patch_1' to the database 'local'? [y/n]`. 
+Expect to see this:
+```bash
+[INFO] Applying patch file 'patches/patch_1/test.sql'
+[INFO]...ok
+```
+Now, before doing any more changes to the database structure, make sure you pull down your database branch and merge it back into your development branch:
+```bash
+git db database pull local
+git checkout local
+git merge database local
+```
+
+# TODOs
+
+1. so far git-db just supporst tables (needs to support views, triggers, functions etc)
