@@ -95,7 +95,7 @@ You should see an information about a patch being created, and a path to where i
 ALTER TABLE auth.user
         ADD COLUMN IF NOT EXISTS first_name character verying(128);
 ```
-where there commented part shows the source file responsible for the change. In this case a change in `user.sql` trigger a corresponding `ALTER TABLE (...)` to be added to the patch. 
+where there commented part shows the source file responsible for the change. In this case a change in `user.sql` has triggered a corresponding `ALTER TABLE (...)` to be added to the patch. 
 > You might also see informations messages like these:
 > ```bash
 > [INFO] creating git_db schema in database 'auth'
@@ -117,7 +117,7 @@ git db patch apply
 As this is a fairly dangerous step (after all you modify your database structure, potentially in a production environment), extra information is displayed back to you, informing you which patch is going to be applied to which of the defined database connections: `Do you want to apply patch 'patch_1' to the database 'local'? [y/n]`. 
 Expect to see this:
 ```bash
-[INFO] Applying patch file 'patches/patch_1/test.sql'
+[INFO] Applying patch file 'patches/patch_1/auth.sql'
 [INFO]...ok
 ```
 Now, before doing any more changes to the database structure, make sure you pull down your database branch and merge it back into your development branch:
