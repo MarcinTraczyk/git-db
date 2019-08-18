@@ -120,7 +120,6 @@ class Database:
 
         name = rw.get_value('git_db', 'query_name', '{branch}/{timestamp}.sql')
         name, timestamp = self.replaceWildcards(name)
-
         nameArray = str.split(name, '/')
         subdir = None
         if len(nameArray) > 1:
@@ -975,12 +974,15 @@ class Database:
         query = query.rstrip(', ')
         query += ') RETURNING id;'
 
-        cursor.execute(query % tuple(params))
-        record = cursor.fetchone()
-        cursor.close()
-        connection.commit()
-        print ('[INFO] query file registered in the database \'' + self.getDatabaseFromPatchTarget() \
-            + '.' + context['database'] + '.git_db.query\', under id=' + str(record[0]))
+        try:
+            cursor.execute(query % tuple(params))
+            record = cursor.fetchone()
+            cursor.close()
+            connection.commit()
+            print ('[INFO] query file registered in the database \'' + self.getDatabaseFromPatchTarget() \
+                + '.' + context['database'] + '.git_db.query\', under id=' + str(record[0]))
+        except:
+            print ('[INFO] query file was not registered in the database')
         return
 
     def getDatabaseFromPatchTarget(self):
